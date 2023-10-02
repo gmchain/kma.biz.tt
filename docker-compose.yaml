@@ -49,8 +49,8 @@ services:
       RABBITMQ_USER: "${RABBITMQ_USER:-guest}"
       RABBITMQ_PASSWORD: "${RABBITMQ_PASSWORD:-guest}"
       # pause between messages
-      MIN_SLEEP: "${MIN_SLEEP}:-10"
-      MAX_SLEEP: "${MAX_SLEEP}:-100"
+      MIN_SLEEP: "${MIN_SLEEP:-10}"
+      MAX_SLEEP: "${MAX_SLEEP:-100}"
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
