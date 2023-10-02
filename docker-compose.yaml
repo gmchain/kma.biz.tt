@@ -1,0 +1,150 @@
+version: "3.9"
+services:
+  http:
+    image: nginx:1.24-alpine
+    container_name: http
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./var/log/nginx:/var/log/nginx
+    configs:
+      - source: http
+        target: /etc/nginx/conf.d/default.conf
+    depends_on:
+      php:
+        condition: service_started
+
+  php:
+    build:
+      context: ./app
+      dockerfile: ./Dockerfile
+    container_name: php
+    volumes:
+      # development purposes
+      - ./app/src:/var/www/app/src
+      - ./var/log/app:/var/log
+      # exchange file. presumed to be changed externally
+      - ./urls.txt:/var/www/app/urls.txt
+      - ./supervisor/supervisor.conf:/etc/supervisor.conf
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      # replication depends on both databases. php depends on the replication
+      sink:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      # no port etc. due to reduced support of environment variables by mariadb official image
+      MARIADB_HOST: "${MARIADB_HOST:-mariadb}"
+      MARIADB_DATABASE: "${MARIADB_DATABASE:-test}"
+      MARIADB_USER: "${MARIADB_USER:-guest}"
+      MARIADB_PASSWORD: "${MARIADB_PASSWORD:-guest}"
+      # same as mariadb
+      CLICKHOUSE_HOST: "${CLICKHOUSE_HOST:-clickhouse}"
+      CLICKHOUSE_DATABASE: "${CLICKHOUSE_DATABASE:-test}"
+      CLICKHOUSE_USER: "${CLICKHOUSE_USER:-guest}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-guest}"
+      # same as databases
+      RABBITMQ_HOST: "${RABBITMQ_HOST:-rabbitmq}"
+      RABBITMQ_USER: "${RABBITMQ_USER:-guest}"
+      RABBITMQ_PASSWORD: "${RABBITMQ_PASSWORD:-guest}"
+      # pause between messages
+      MIN_SLEEP: "${MIN_SLEEP}:-10"
+      MAX_SLEEP: "${MAX_SLEEP}:-100"
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    volumes:
+      - ./var/lib/rabbitmq:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER:-guest}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD:-guest}"
+    # official healthcheck
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 30s
+      retries: 5
+
+  # replication container by altinity, https://github.com/Altinity/clickhouse-sink-connector
+  sink:
+    container_name: sink
+    # should be built due to environment variables in the configuration file
+    build:
+      context: .
+      dockerfile: ./db/sink/Dockerfile
+    environment:
+      MARIADB_HOST: "${MARIADB_HOST:-mariadb}"
+      MARIADB_USER: "${MARIADB_USER:-guest}"
+      MARIADB_PASSWORD: "${MARIADB_PASSWORD:-guest}"
+      MARIADB_DATABASE: "${MARIADB_DATABASE:-test}"
+      CLICKHOUSE_HOST: "${CLICKHOUSE_HOST:-clickhouse}"
+      CLICKHOUSE_USER: "${CLICKHOUSE_USER:-guest}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-guest}"
+      CLICKHOUSE_DATABASE: "${CLICKHOUSE_DATABASE:-test}"
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: "./sink-connector-client show_replica_status | grep '\"Replica_Running\": true' > /dev/null"
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+
+  mariadb:
+    image: mariadb:11-jammy
+    container_name: mariadb
+    volumes:
+      - ./var/lib/mariadb:/var/lib/mysql
+      - ./db/mariadb/initdb/mariadb.sh:/docker-entrypoint-initdb.d/mariadb.sh
+    command:
+      # default connection charset
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # replication settings
+      - --binlog-format=ROW
+      - --log-bin
+      - --log-basename=master1
+    restart: unless-stopped
+    # official healthcheck
+    healthcheck:
+      test: healthcheck.sh --su-mysql --connect --innodb_initialized
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    environment:
+      MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: 1
+      MARIADB_USER: "${MARIADB_USER:-guest}"
+      MARIADB_PASSWORD: "${MARIADB_PASSWORD:-guest}"
+      MARIADB_DATABASE: "${MARIADB_DATABASE:-test}"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23-alpine
+    container_name: clickhouse
+    volumes:
+      - ./var/lib/clickhouse:/var/lib/clickhouse
+    restart: unless-stopped
+    # official healthcheck
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_USER: "${CLICKHOUSE_USER:-guest}"
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-guest}"
+      CLICKHOUSE_DB: "${CLICKHOUSE_DATABASE:-test}"
+
+configs:
+  http:
+    file: ./http/default.conf
